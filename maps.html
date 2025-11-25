@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Маршрут с транспортом и деталями</title>
+    <style>
+        body, html { margin: 0; padding: 0; height: 100%; font-family: Arial, sans-serif; }
+        
+        #map { width: 100%; height: 100%; cursor: crosshair; }
+
+        /* Панель управления */
+        .controls-panel {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            width: 360px; /* Чуть шире для деталей */
+            background: white;
+            padding: 20px;
+            z-index: 2000;
+            border-radius: 8px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+            display: flex;
+            flex-direction: column;
+            max-height: 90vh; /* Чтобы не улезала за экран */
+        }
+
+        .hint { font-size: 11px; color: #888; text-align: center; margin-bottom: 10px; }
+        #clickStatus { font-size: 12px; color: #1e98ff; text-align: center; margin-bottom: 5px; height: 15px; }
+
+        .input-container { position: relative; margin-bottom: 10px; }
+
+        /* Подсветка активного поля */
+        .active-field { border: 2px solid #1e98ff !important; background-color: #f0f8ff; }
+
+        label { display: block; margin-bottom: 3px; color: #555; font-size: 12px; }
+
+        input {
+            width: 100%; padding: 10px; box-sizing: border-box;
+            border: 1px solid #ccc; border-radius: 4px; font-size: 14px;
+        }
+
+        /* Кнопки выбора типа маршрута */
+        .modes-container {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 15px;
+            background: #f0f0f0;
+            border-radius: 5px;
+            padding: 3px;
+        }
+
+        .mode-btn {
+            flex: 1;
+            border: none;
+            background: transparent;
+            padding: 8px 0;
+            cursor: pointer;
+            font-size: 13px;
+            border-radius: 4px;
+            transition: 0.2s;
+            color: #555;
+        }
+
+        .mode-btn:hover { background: #e0e0e0; }
+
+        .mode-btn.active {
+            background: white;
+            font-weight: bold;
+            color: #000;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        /* Список подсказок (Geocode) */
+        .suggestions-list {
+            position: absolute; top: 100%; left: 0; right: 0;
+            background: white; border: 1px solid #ccc; border-top: none;
+            max-height: 200px; overflow-y: auto; z-index: 3000;
+            display: none; box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        .suggestion-item { padding: 10px; cursor: pointer; font-size: 13px; border-bottom: 1px solid #eee; }
+        .suggestion-item:hover { background-color: #f0f8ff; }
+        .suggestion-item strong { display: block; color: #000; }
+        .suggestion-item span { color: #777; font-size: 11px; }
+
+        button.main-btn {
+            width: 100%; padding: 12px;
+            background: #fc0; border: none; border-radius: 4px;
+            cursor: pointer; font-weight: bold; font-size: 16px;
+        }
+        button.main-btn:hover { background: #f2c200; }
+
+        /* Блок с результатами маршрута */
+        .route-details {
+            margin-top: 15px;
+            border-top: 1px solid #eee;
+            padding-top: 10px;
+            overflow-y: auto; /* Скролл, если много шагов */
+            flex-grow: 1; /* Занимает оставшееся место */
+        }
+
+        .route-summary { font-size: 16px; font-weight: bold; margin-bottom: 10px; }
+        .route-summary span { font-weight: normal; color: #666; font-size: 14px; }
+
+        /* Стили для шагов общественного транспорта */
+        .step-item {
+            display: flex;
+            align-items: flex-start;
+            margin-bottom: 10px;
+            font-size: 13px;
+        }
+        .step-icon {
+            width: 24px; height: 24px;
+            background: #eee; border-radius: 50%;
+            text-align: center; line-height: 24px;
+            margin-right: 10px; font-size: 14px; flex-shrink: 0;
+        }
+        .step-text { line-height: 1.4; color: #333; }
+        .step-meta { color: #888; font-size: 11px; }
+    </style>
+
+    <!-- API Ключ -->
+    <script src="https://api-maps.yandex.ru/2.1/?apikey=<api_here>&lang=ru_RU" type="text/javascript"></script>
+</head>
+<body>
+
+    <div class="controls-panel">
+        <h3 style="text-align:center; margin-top:0;">Маршрут</h3>
+        <p class="hint">Кликните по карте или введите адрес (Enter)</p>
+        <div id="clickStatus"></div>
+
+        <!-- Выбор типа маршрута -->
+        <div class="modes-container">
+            <button class="mode-btn active" onclick="setMode('auto')" id="btn-auto">🚗 Авто</button>
+            <button class="mode-btn" onclick="setMode('masstransit')" id="btn-transit">🚌 Транспорт</button>
+            <button class="mode-btn" onclick="setMode('pedestrian')" id="btn-pedestrian">🚶 Пешком</button>
+        </div>
+        
+        <div class="input-container">
+            <label>Откуда:</label>
+            <input type="text" id="startInput" class="active-field" placeholder="Кликните на карте..." autocomplete="off">
+            <div id="startList" class="suggestions-list"></div>
+        </div>
+        
+        <div class="input-container">
+            <label>Куда:</label>
+            <input type="text" id="endInput" placeholder="Кликните на карте..." autocomplete="off">
+            <div id="endList" class="suggestions-list"></div>
+        </div>
+
+        <button class="main-btn" onclick="buildRoute()">Построить</button>
+        
+        <!-- Сюда будем выводить детали -->
+        <div id="routeDetails" class="route-details"></div>
+    </div>
+
+    <div id="map"></div>
+
+    <script>
+        var myMap;
+        var multiRoute = null;
+        var currentInputId = 'startInput';
+        var currentMode = 'auto'; // По умолчанию авто
+        
+        var strictMoscowBounds = [[55.489926, 37.319329], [56.009657, 37.945661]];
+
+        ymaps.ready(init);
+
+        function init() {
+            myMap = new ymaps.Map('map', {
+                center: [55.751574, 37.573856],
+                zoom: 11,
+                controls: ['zoomControl', 'fullscreenControl']
+            });
+
+            setupEnterSearch('startInput', 'startList');
+            setupEnterSearch('endInput', 'endList');
+
+            // Обработка фокуса полей
+            document.getElementById('startInput').addEventListener('focus', function() { setActiveField('startInput'); });
+            document.getElementById('endInput').addEventListener('focus', function() { setActiveField('endInput'); });
+
+            // Обработка клика по карте
+            myMap.events.add('click', function (e) {
+                var coords = e.get('coords');
+                var statusDiv = document.getElementById('clickStatus');
+                statusDiv.innerText = "Ищем адрес...";
+
+                ymaps.geocode(coords, { kind: 'house', results: 1 }).then(function (res) {
+                    var obj = res.geoObjects.get(0);
+                    if (obj) {
+                        document.getElementById(currentInputId).value = obj.getAddressLine();
+                        statusDiv.innerText = "";
+                        if (currentInputId === 'startInput') setActiveField('endInput');
+                    } else {
+                        statusDiv.innerText = "Адрес не найден";
+                    }
+                });
+            });
+        }
+
+        function setActiveField(id) {
+            currentInputId = id;
+            document.getElementById('startInput').classList.remove('active-field');
+            document.getElementById('endInput').classList.remove('active-field');
+            document.getElementById(id).classList.add('active-field');
+        }
+
+        // --- Смена режима (Авто / Транспорт / Пешком) ---
+        function setMode(mode) {
+            currentMode = mode;
+            // Обновляем вид кнопок
+            document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+            if(mode === 'auto') document.getElementById('btn-auto').classList.add('active');
+            if(mode === 'masstransit') document.getElementById('btn-transit').classList.add('active');
+            if(mode === 'pedestrian') document.getElementById('btn-pedestrian').classList.add('active');
+
+            // Если адреса уже введены, сразу перестраиваем
+            var start = document.getElementById('startInput').value;
+            var end = document.getElementById('endInput').value;
+            if (start && end) {
+                buildRoute();
+            }
+        }
+
+        function buildRoute() {
+            var start = document.getElementById('startInput').value;
+            var end = document.getElementById('endInput').value;
+            var detailsDiv = document.getElementById('routeDetails');
+
+            if (!start || !end) {
+                alert("Заполните оба поля адреса!");
+                return;
+            }
+
+            if (multiRoute) myMap.geoObjects.remove(multiRoute);
+            detailsDiv.innerHTML = "<i>Построение маршрута...</i>";
+
+            // Создаем маршрут с выбранным режимом (currentMode)
+            multiRoute = new ymaps.multiRouter.MultiRoute({
+                referencePoints: [start, end],
+                params: {
+                    routingMode: currentMode, // 'auto', 'masstransit', 'pedestrian'
+                    boundedBy: strictMoscowBounds
+                }
+            }, {
+                boundsAutoApply: true
+            });
+
+            myMap.geoObjects.add(multiRoute);
+
+            // КОГДА МАРШРУТ НАЙДЕН -> РАЗБИРАЕМ ДЕТАЛИ
+            multiRoute.model.events.add('requestsuccess', function() {
+                var activeRoute = multiRoute.getActiveRoute();
+                if (!activeRoute) {
+                    detailsDiv.innerHTML = "Маршрут не найден";
+                    return;
+                }
+
+                // Общее время и расстояние
+                var duration = activeRoute.properties.get("duration").text;
+                var distance = activeRoute.properties.get("distance").text;
+                
+                var html = `<div class="route-summary">${duration} <span>(${distance})</span></div>`;
+
+                // Если это Общественный транспорт, выводим шаги
+                if (currentMode === 'masstransit') {
+                    var paths = activeRoute.getPaths();
+                    // Берем первый вариант пути
+                    var path = paths.get(0); 
+                    var segments = path.getSegments();
+
+                    segments.each(function(segment) {
+                        var type = segment.properties.get('type'); // 'walk', 'transport', 'transfer'
+                        var text = "";
+                        var icon = "";
+                        var meta = "";
+
+                        if (type === 'walk') {
+                            icon = "🚶";
+                            text = "Пешком " + segment.properties.get("distance").text;
+                            meta = segment.properties.get("duration").text;
+                        } 
+                        else if (type === 'transport') {
+                            var transports = segment.properties.get('transports');
+                            if (transports && transports.length > 0) {
+                                var t = transports[0]; // Берем первый транспорт (например, Автобус 22)
+                                icon = getTransportIcon(t.type);
+                                text = t.name; // Номер маршрута
+                                meta = segment.properties.get("stopsCount") + " ост. (" + segment.properties.get("duration").text + ")";
+                            }
+                        } 
+                        else if (type === 'transfer') {
+                            icon = "🔄";
+                            text = "Пересадка";
+                            meta = segment.properties.get("duration").text;
+                        }
+
+                        // Добавляем шаг в HTML
+                        if (text) {
+                            html += `
+                            <div class="step-item">
+                                <div class="step-icon">${icon}</div>
+                                <div>
+                                    <div class="step-text">${text}</div>
+                                    <div class="step-meta">${meta}</div>
+                                </div>
+                            </div>`;
+                        }
+                    });
+                } else if (currentMode === 'auto') {
+                    // Для авто покажем пробки
+                    var durationInTraffic = activeRoute.properties.get("durationInTraffic").text;
+                    html += `<div style="font-size:13px; color:#555;">С учетом пробок: <b>${durationInTraffic}</b></div>`;
+                }
+
+                detailsDiv.innerHTML = html;
+            });
+
+            multiRoute.model.events.add('requestfail', function(e) {
+                detailsDiv.innerHTML = "<span style='color:red'>Ошибка построения маршрута</span>";
+            });
+        }
+
+        // Вспомогательная иконка для транспорта
+        function getTransportIcon(type) {
+            if (type === 'bus') return '🚌';
+            if (type === 'trolleybus') return '🚎';
+            if (type === 'tramway') return '🚋';
+            if (type === 'underground') return '🚇'; // Метро
+            if (type === 'railway') return '🚆'; // Электричка
+            return '🚌';
+        }
+
+        // --- (Старый код поиска по Enter) ---
+        function setupEnterSearch(inputId, listId) {
+            var input = document.getElementById(inputId);
+            var list = document.getElementById(listId);
+            input.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') {
+                    var query = input.value;
+                    if(query) searchAddressInMoscow(query, list, input);
+                }
+            });
+            document.addEventListener('click', function(e) {
+                if (e.target !== input && e.target !== list) list.style.display = 'none';
+            });
+        }
+        function searchAddressInMoscow(userQuery, listElement, inputElement) {
+            listElement.innerHTML = '<div style="padding:10px;">Поиск...</div>';
+            listElement.style.display = 'block';
+            ymaps.geocode("Москва, " + userQuery, { boundedBy: strictMoscowBounds, strictBounds: true, results: 5 })
+            .then(function (res) {
+                listElement.innerHTML = '';
+                if (res.geoObjects.getLength() === 0) {
+                    listElement.innerHTML = '<div style="padding:10px; color:red;">Не найдено</div>'; return;
+                }
+                res.geoObjects.each(function (obj) {
+                    var item = document.createElement('div');
+                    item.className = 'suggestion-item';
+                    item.innerHTML = '<strong>' + obj.properties.get('name') + '</strong><span>' + obj.properties.get('description') + '</span>';
+                    item.onclick = function() {
+                        inputElement.value = obj.getAddressLine();
+                        listElement.style.display = 'none';
+                    };
+                    listElement.appendChild(item);
+                });
+            });
+        }
+    </script>
+</body>
+</html>
