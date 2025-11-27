@@ -1,38 +1,34 @@
-//Вариант топ-3
-
 // === НАСТРОЙКИ ===
-const API_KEY = ''; // Ваш API Ключ Яндекс
-const TRAFF_COEFF = 1.4; // Коэффициент пробок (1.0 - пустая дорога, 1.4 - день)
-
-// Оптимизация: для каждого человека сначала ищем 3 ближайшие больницы "по линейке",
-// и только для них строим реальный маршрут, чтобы не ждать вечность.
+const API_KEY = '40c0ece5-dbf1-44cf-97f9-1a0e1a5f0ef7'; // ⚠️ ВСТАВЬТЕ СЮДА ВАШ API КЛЮЧ ЯНДЕКС
+const TRAFF_COEFF = 1.4; 
 const CHECK_CANDIDATES = 3; 
+const REQUEST_TIMEOUT = 5000; // 5 секунд тайм-аут
 
-// === СПИСОК ПАЦИЕНТОВ (20 точек по всей Москве) ===
+// === СПИСОК ПАЦИЕНТОВ ===
 const people = [
-    "Москва, Красная площадь, 1",                // Центр
-    "Москва, ул. Остоженка, 10",                 // Центр (Кропоткинская)
-    "Москва, ВДНХ (Главный вход)",               // СВАО
-    "Москва, МГУ (Воробьевы горы)",              // ЮЗАО
-    "Москва, Южное Бутово, ул. Скобелевская 1",  // Юг (замкадье)
+    "Москва, Красная площадь, 1",
+    "Москва, ул. Остоженка, 10",
+    "Москва, ВДНХ (Главный вход)",
+    "Москва, МГУ (Воробьевы горы)",
+    "Москва, Южное Бутово, ул. Скобелевская 1",
     "Москва, Северное Бутово, бульвар Дмитрия Донского, 1",
-    "Москва, 1-я Парковая ул. 54",               // ВАО (Измайлово)
-    "Москва, Митино, Пятницкое шоссе, 15",       // СЗАО (замкадье)
-    "Москва, Алтуфьевское шоссе, 100",           // Север (МКАД)
-    "Москва, Выхино, ул. Хлобыстова, 10",        // ЮВАО
-    "Москва, Крылатские холмы, 35",              // ЗАО
-    "Москва, Марьино, Новомарьинская ул., 5",    // ЮВАО
-    "Москва, Ленинградский проспект, 75",        // Сокол
-    "Москва, Таганская площадь, 1",              // Центр
-    "Москва, Хамовнический вал, 20",             // Хамовники
-    "Москва, Медведково, ул. Широкая, 12",       // СВАО
-    "Москва, Строгино, ул. Исаковского, 2",      // СЗАО
-    "Москва, Ясенево, Литовский бульвар, 7",     // ЮЗАО
-    "Москва, Зеленоград, корп. 100",             // Зеленоград (далеко!)
-    "Москва, пос. Коммунарка, ул. Липовый парк, 2" // Новая Москва
+    "Москва, 1-я Парковая ул. 54",
+    "Москва, Митино, Пятницкое шоссе, 15",
+    "Москва, Алтуфьевское шоссе, 100",
+    "Москва, Выхино, ул. Хлобыстова, 10",
+    "Москва, Крылатские холмы, 35",
+    "Москва, Марьино, Новомарьинская ул., 5",
+    "Москва, Ленинградский проспект, 75",
+    "Москва, Таганская площадь, 1",
+    "Москва, Хамовнический вал, 20",
+    "Москва, Медведково, ул. Широкая, 12",
+    "Москва, Строгино, ул. Исаковского, 2",
+    "Москва, Ясенево, Литовский бульвар, 7",
+    "Москва, Зеленоград, корп. 100",
+    "Москва, пос. Коммунарка, ул. Липовый парк, 2"
 ];
 
-// === СПИСОК БОЛЬНИЦ (30 реальных стационаров Москвы) ===
+// === СПИСОК БОЛЬНИЦ ===
 const hospitals = [
     { name: "НИИ Склифосовского", address: "Москва, Большая Сухаревская площадь, 3" },
     { name: "Боткинская больница", address: "Москва, 2-й Боткинский проезд, 5" },
@@ -66,25 +62,49 @@ const hospitals = [
     { name: "ГКБ №3 им. Кончаловского", address: "Москва, Зеленоград, Каштановая аллея, 2" }
 ];
 
-// === ФУНКЦИИ ===
+// === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
 
-async function getCoords(address) {
-    const moscowBbox = "36.800000,55.100000~38.200000,56.400000"; // Чуть расширил границы (для Зеленограда)
-    const url = `https://geocode-maps.yandex.ru/1.x/?apikey=${API_KEY}&format=json&geocode=${encodeURIComponent(address)}&bbox=${moscowBbox}&rspn=1`;
+function generateYandexUrl(address) {
+    const moscowBbox = "36.800000,55.100000~38.200000,56.400000";
+    // Генерируем ссылку, которую использует fetch
+    return `https://geocode-maps.yandex.ru/1.x/?apikey=${API_KEY}&format=json&geocode=${encodeURIComponent(address)}&bbox=${moscowBbox}&rspn=1`;
+}
+
+async function fetchWithTimeout(url, options = {}) {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
     try {
-        const res = await fetch(url);
+        const response = await fetch(url, { ...options, signal: controller.signal });
+        clearTimeout(id);
+        return response;
+    } catch (error) {
+        clearTimeout(id);
+        throw error;
+    }
+}
+
+async function getCoords(address, url) {
+    try {
+        // url передаем снаружи, чтобы он был точно такой же, как в ссылке для пользователя
+        const res = await fetchWithTimeout(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        
         const data = await res.json();
         const featureMember = data.response.GeoObjectCollection.featureMember;
+        
         if (!featureMember || featureMember.length === 0) return null;
+        
         const [lon, lat] = featureMember[0].GeoObject.Point.pos.split(' ').map(Number);
         return { lat, lon };
-    } catch (e) { return null; }
+    } catch (e) {
+        return null; // Ошибки обрабатываем выше
+    }
 }
 
 async function getRoute(start, end) {
-    const url = `http://router.project-osrm.org/route/v1/driving/${start.lon},${start.lat};${end.lon},${end.lat}?overview=false`;
+    const url = `https://router.project-osrm.org/route/v1/driving/${start.lon},${start.lat};${end.lon},${end.lat}?overview=false`;
     try {
-        const res = await fetch(url);
+        const res = await fetchWithTimeout(url);
         const data = await res.json();
         if (data.code !== 'Ok') return null;
         return {
@@ -105,42 +125,47 @@ function getDirectDist(c1, c2) {
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
+function getYandexMapLink(from, to) {
+    return `https://yandex.ru/maps/?rtext=${from.lat},${from.lon}~${to.lat},${to.lon}&rtt=auto`;
+}
+
 const delay = ms => new Promise(r => setTimeout(r, ms));
 
 // === ЗАПУСК ===
 
 async function main() {
-    console.log(`🏥 1. Геокодирование базы больниц (${hospitals.length} шт)...`);
-    
-    // Получаем координаты всех больниц (один раз)
+    if (!API_KEY) {
+        console.error("⛔ ОШИБКА: Нет API_KEY!"); 
+        return;
+    }
+
+    console.log(`🏥 1. Геокодирование больниц...`);
     const activeHospitals = [];
     for (const h of hospitals) {
-        const coords = await getCoords(h.address);
+        const url = generateYandexUrl(h.address);
+        const coords = await getCoords(h.address, url);
         if (coords) activeHospitals.push({ ...h, coords });
-        // Маленькая пауза, чтобы Яндекс не ругался на массовый запрос
-        await delay(50); 
+        await delay(50);
     }
-    console.log(`✅ База готова: ${activeHospitals.length} из ${hospitals.length} больниц найдены.\n`);
+    console.log(`✅ Больниц найдено: ${activeHospitals.length}\n`);
 
-    // Обработка людей
     for (let i = 0; i < people.length; i++) {
         const personAddr = people[i];
         console.log(`👤 [${i+1}/${people.length}] Пациент: "${personAddr}"`);
 
-        const personCoords = await getCoords(personAddr);
+        // Генерируем URL здесь, чтобы показать его пользователю
+        const jsonUrl = generateYandexUrl(personAddr);
+        const personCoords = await getCoords(personAddr, jsonUrl);
+
         if (!personCoords) { 
-            console.log("   ❌ Ошибка: Адрес пациента не найден"); 
+            console.log("   ❌ Ошибка: Адрес не найден"); 
+            console.log(`   🐛 JSON (Debug): ${jsonUrl}`); // Ссылка на JSON при ошибке
             console.log("-".repeat(40));
             continue; 
         }
 
-        // 1. Фильтрация: Сортируем все 30 больниц по прямой линии
-        const candidates = activeHospitals.map(h => {
-            return { ...h, tempDist: getDirectDist(personCoords, h.coords) };
-        });
+        const candidates = activeHospitals.map(h => ({ ...h, tempDist: getDirectDist(personCoords, h.coords) }));
         candidates.sort((a, b) => a.tempDist - b.tempDist);
-
-        // 2. Уточнение: Берем топ-3 ближайших геометрически и строим маршруты
         const checkList = candidates.slice(0, CHECK_CANDIDATES);
         
         let bestHospital = null;
@@ -148,27 +173,23 @@ async function main() {
         let finalDistance = 0;
 
         for (const hospital of checkList) {
-            // Строим маршрут через OSRM
             const route = await getRoute(personCoords, hospital.coords);
-            await delay(100); // Пауза для OSRM
-
-            if (route) {
-                 // console.log(`      ? Проверка: ${hospital.name} -> ${Math.round(route.time)} мин`); // раскомментируйте для отладки
-                if (route.time < minTime) {
-                    minTime = route.time;
-                    bestHospital = hospital;
-                    finalDistance = route.dist;
-                }
+            await delay(100);
+            if (route && route.time < minTime) {
+                minTime = route.time;
+                bestHospital = hospital;
+                finalDistance = route.dist;
             }
         }
 
-        // 3. Результат
         if (bestHospital) {
             console.log(`   🚑 Ехать в: ${bestHospital.name}`);
-            console.log(`   📍 Адрес: ${bestHospital.address}`);
-            console.log(`   ⏱️ Время: ~${Math.round(minTime)} мин (Дистанция: ${finalDistance.toFixed(1)} км)`);
+            console.log(`   ⏱️ Время: ~${Math.round(minTime)} мин`);
+            console.log(`   🔗 Карта маршрута: ${getYandexMapLink(personCoords, bestHospital.coords)}`);
+            // Ссылка на JSON для успешного поиска (на случай если координаты странные)
+            console.log(`   🐛 JSON (Debug): ${jsonUrl}`); 
         } else {
-            console.log("   ❌ Маршруты не найдены");
+            console.log("   ❌ Маршрут не построен");
         }
         console.log("-".repeat(40));
     }
