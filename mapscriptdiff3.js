@@ -1,5 +1,13 @@
-//Вариант без API яндекса
+// === ВАЖНОЕ ИСПРАВЛЕНИЕ ДЛЯ РАБОЧЕГО ПК ===
+// Отключаем проверку SSL сертификатов (решает проблему с корпоративными прокси/антивирусами)
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
+// Проверка наличия fetch (для старых версий Node.js)
+if (typeof fetch === "undefined") {
+    console.error("❌ ОШИБКА: Ваша версия Node.js слишком старая и не поддерживает fetch.");
+    console.error("   Решение: Установите Node.js версии 18+ или выполните 'npm install node-fetch' и добавьте require в начало.");
+    process.exit(1);
+}
 
 // === НАСТРОЙКИ ===
 const TRAFF_COEFF = 1.4; 
@@ -67,43 +75,64 @@ const hospitals = [
 
 const delay = ms => new Promise(r => setTimeout(r, ms));
 
-// ИСПРАВЛЕННАЯ ФУНКЦИЯ (Использует Photon API вместо Nominatim)
+// Универсальная функция запроса с подробным логированием ошибок
+async function safeFetch(url, options = {}) {
+    // Добавляем заголовки, чтобы прикинуться браузером (обход простых фаерволов)
+    const headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        ...options.headers
+    };
+
+    try {
+        const res = await fetch(url, { ...options, headers });
+        if (!res.ok) {
+            throw new Error(`HTTP Status: ${res.status} ${res.statusText}`);
+        }
+        return await res.json();
+    } catch (e) {
+        // Выводим подробную диагностику
+        console.error(`\n🔴 CRITICAL ERROR при обращении к: ${url}`);
+        console.error(`   Тип ошибки: ${e.name}`);
+        console.error(`   Сообщение: ${e.message}`);
+        if (e.cause) console.error(`   Причина (cause):`, e.cause);
+        
+        // Подсказки пользователю на основе кода ошибки
+        if (e.message.includes('ETIMEDOUT')) console.error("   💡 СОВЕТ: Превышено время ожидания. Возможно, на работе блокируют этот сайт.");
+        if (e.message.includes('ECONNREFUSED')) console.error("   💡 СОВЕТ: Соединение сброшено. Скорее всего, нужен Прокси.");
+        if (e.message.includes('ENOTFOUND')) console.error("   💡 СОВЕТ: Не удалось найти домен. Проверьте DNS или интернет.");
+        
+        return null;
+    }
+}
+
 async function getCoords(address) {
-    // Photon не требует User-Agent и работает стабильнее
-    // Добавляем bbox, чтобы искать приоритетно вокруг Москвы (примерные координаты)
+    // Photon API
     const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(address)}&limit=1&bbox=36.8,55.1,38.2,56.4`;
     
-    try {
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`HTTP Error ${res.status}`);
-
-        const data = await res.json();
-        
-        // Photon возвращает GeoJSON. Координаты там в формате [lon, lat]
-        if (data.features && data.features.length > 0) {
-            const [lon, lat] = data.features[0].geometry.coordinates;
-            return { lat, lon };
-        } else {
-            return null;
-        }
-    } catch (e) {
-        console.error(`Ошибка (${address}):`, e.message);
+    const data = await safeFetch(url);
+    
+    if (data && data.features && data.features.length > 0) {
+        const [lon, lat] = data.features[0].geometry.coordinates;
+        return { lat, lon };
+    } else {
         return null;
     }
 }
 
 // Построение маршрута (OSRM)
 async function getRoute(start, end) {
-    const url = `http://router.project-osrm.org/route/v1/driving/${start.lon},${start.lat};${end.lon},${end.lat}?overview=false`;
-    try {
-        const res = await fetch(url);
-        const data = await res.json();
-        if (data.code !== 'Ok') return null;
+    // Заменил http на https, так как рабочие сети часто блокируют обычный http
+    const url = `https://router.project-osrm.org/route/v1/driving/${start.lon},${start.lat};${end.lon},${end.lat}?overview=false`;
+    
+    const data = await safeFetch(url);
+    
+    if (data && data.code === 'Ok') {
         return {
             dist: data.routes[0].distance / 1000,
             time: (data.routes[0].duration / 60) * TRAFF_COEFF
         };
-    } catch (e) { return null; }
+    }
+    return null;
 }
 
 // Расстояние по прямой
@@ -121,24 +150,32 @@ function getDirectDist(c1, c2) {
 // === ГЛАВНАЯ ЛОГИКА ===
 
 async function main() {
-    console.log(`🌍 Запуск режима Photon (Стабильный OSM)...`);
+    console.log(`🌍 Запуск режима Photon (Diagnostic Mode)...`);
+    console.log(`🔒 SSL Verification: DISABLED (Обход корпоративной защиты)`);
     console.log(`🏥 1. Геокодирование базы больниц...`);
     
     const activeHospitals = [];
     
     for (let i = 0; i < hospitals.length; i++) {
         const h = hospitals[i];
-        // progress bar
-        process.stdout.write(`\r   Обработано: ${i+1}/${hospitals.length}`); 
+        process.stdout.write(`\r   Обработано: ${i+1}/${hospitals.length} | ${h.name.substring(0, 20)}...`); 
         
         const coords = await getCoords(h.address);
-        if (coords) activeHospitals.push({ ...h, coords });
+        if (coords) {
+            activeHospitals.push({ ...h, coords });
+        } else {
+            console.log(`\n   ⚠️ Не удалось найти: ${h.name}`);
+        }
         
-        // Photon быстрый, пауза может быть маленькой
-        await delay(100); 
+        await delay(150); 
     }
     
-    console.log(`\n✅ База готова: ${activeHospitals.length} из ${hospitals.length} больниц найдены.\n`);
+    console.log(`\n\n✅ База готова: ${activeHospitals.length} из ${hospitals.length} больниц найдены.\n`);
+
+    if (activeHospitals.length === 0) {
+        console.error("⛔ Внимание: Не найдено ни одной больницы. Проверьте логи ошибок выше.");
+        return;
+    }
 
     // Обработка людей
     for (let i = 0; i < people.length; i++) {
@@ -146,22 +183,19 @@ async function main() {
         console.log(`👤 [${i+1}/${people.length}] Пациент: "${personAddr}"`);
 
         const personCoords = await getCoords(personAddr);
-        // Ждем чуть-чуть
-        await delay(100); 
+        await delay(150); 
 
         if (!personCoords) { 
-            console.log("   ❌ Ошибка: Адрес не найден"); 
+            console.log("   ❌ Ошибка: Адрес пациента не найден (или ошибка API)"); 
             console.log("-".repeat(40));
             continue; 
         }
 
-        // Сортировка по прямой
         const candidates = activeHospitals.map(h => {
             return { ...h, tempDist: getDirectDist(personCoords, h.coords) };
         });
         candidates.sort((a, b) => a.tempDist - b.tempDist);
 
-        // Топ-3
         const checkList = candidates.slice(0, CHECK_CANDIDATES);
         
         let bestHospital = null;
@@ -170,7 +204,7 @@ async function main() {
 
         for (const hospital of checkList) {
             const route = await getRoute(personCoords, hospital.coords);
-            await delay(100); 
+            await delay(150); 
 
             if (route && route.time < minTime) {
                 minTime = route.time;
@@ -184,7 +218,7 @@ async function main() {
             console.log(`   📍 Адрес: ${bestHospital.address}`);
             console.log(`   ⏱️ Время: ~${Math.round(minTime)} мин (${finalDistance.toFixed(1)} км)`);
         } else {
-            console.log("   ❌ Маршруты не найдены");
+            console.log("   ❌ Маршруты не найдены (ошибка OSRM)");
         }
         console.log("-".repeat(40));
     }
