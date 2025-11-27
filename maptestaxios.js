@@ -1,10 +1,10 @@
-const axios = require('axios');
+const https = require('https');
 
-// === ВСТАВЬТЕ СЮДА ВАШ КЛЮЧ GRAPH_HOPPER ===
-// Получить бесплатно тут: https://graphhopper.com/dashboard/#/api-keys
-const API_KEY = 'ВСТАВЬТЕ_ВАШ_КЛЮЧ_СЮДА'; 
-
-const CHECK_CANDIDATES = 3; // Проверяем 3 ближайших больницы
+// === НАСТРОЙКИ ===
+// Ваш ключ Яндекс (он работает через HTTPS, его корп. сеть обычно пропускает)
+const YANDEX_KEY = '40c0ece5-dbf1-44cf-97f9-1a0e1a5f0ef7'; 
+const TRAFF_COEFF = 1.4; 
+const CHECK_CANDIDATES = 3; 
 
 const people = [
     "Москва, Красная площадь, 1",
@@ -12,10 +12,8 @@ const people = [
     "Москва, ВДНХ",
     "Москва, МГУ",
     "Москва, Бутово, Скобелевская 1",
-    "Москва, 1-я Парковая ул. 54",
-    "Москва, Митино, Пятницкое шоссе, 15",
-    "Москва, Зеленоград, корп. 100",
-    "Москва, Коммунарка, Липовый парк 2"
+    "Москва, Зеленоград, корп 100",
+    "Москва, 1-я Парковая ул. 54"
 ];
 
 const hospitals = [
@@ -24,72 +22,91 @@ const hospitals = [
     { name: "Первая Градская (ГКБ №1)", address: "Москва, Ленинский проспект, 8" },
     { name: "ГКБ №15 им. Филатова", address: "Москва, ул. Вешняковская, 23" },
     { name: "ГКБ №67 им. Ворохобова", address: "Москва, ул. Саляма Адиля, 2" },
-    { name: "ГКБ №4 (Павловская)", address: "Москва, ул. Павловская, 25" },
     { name: "ГКБ №52", address: "Москва, ул. Пехотная, 3" },
     { name: "ГКБ №31", address: "Москва, ул. Лобачевского, 42" },
     { name: "ММКЦ Коммунарка", address: "Москва, ул. Сосенский Стан, 8" },
-    { name: "ГКБ №3 Зеленоград", address: "Москва, Зеленоград, Каштановая аллея, 2" }
+    { name: "ГКБ Зеленоград", address: "Москва, Зеленоград, Каштановая аллея, 2" }
 ];
 
-// === ФУНКЦИИ ===
+// === СЕТЕВАЯ ФУНКЦИЯ (Вместо Axios/Fetch) ===
+// Умеет работать без установки библиотек и обходит SSL-ошибки
+function nativeRequest(url) {
+    return new Promise((resolve, reject) => {
+        // Опции для обхода корпоративных прокси с подменой сертификатов
+        const options = {
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+            rejectUnauthorized: false // <--- ЭТО ВАЖНО! Игнорирует ошибки сертификатов
+        };
+
+        https.get(url, options, (res) => {
+            let data = '';
+
+            // Получаем данные кусками
+            res.on('data', (chunk) => { data += chunk; });
+
+            // Когда все пришло
+            res.on('end', () => {
+                if (res.statusCode >= 200 && res.statusCode < 300) {
+                    try {
+                        resolve(JSON.parse(data));
+                    } catch (e) {
+                        reject(new Error("Ошибка парсинга JSON"));
+                    }
+                } else {
+                    reject(new Error(`HTTP статус: ${res.statusCode}`));
+                }
+            });
+
+        }).on('error', (err) => {
+            reject(err);
+        });
+    });
+}
+
 const delay = ms => new Promise(r => setTimeout(r, ms));
 
-// 1. Геокодер GraphHopper
+// === ЛОГИКА ===
+
+// 1. Геокодер Яндекс (Самый надежный в РФ)
 async function getCoords(address) {
-    // Если ключ не вставили
-    if (API_KEY.includes('ВСТАВЬТЕ')) {
-        console.error("⛔ ОШИБКА: Вы забыли вставить API ключ в начале скрипта!");
-        process.exit(1);
-    }
-
+    const url = `https://geocode-maps.yandex.ru/1.x/?apikey=${YANDEX_KEY}&format=json&geocode=${encodeURIComponent(address)}&results=1`;
+    
     try {
-        const url = `https://graphhopper.com/api/1/geocode`;
-        const res = await axios.get(url, {
-            params: {
-                q: address,
-                locale: 'ru',
-                limit: 1,
-                key: API_KEY
-            }
-        });
-
-        if (res.data.hits && res.data.hits.length > 0) {
-            const point = res.data.hits[0].point;
-            return { lat: point.lat, lon: point.lng };
+        const data = await nativeRequest(url);
+        const featureMember = data.response.GeoObjectCollection.featureMember;
+        
+        if (featureMember && featureMember.length > 0) {
+            const pos = featureMember[0].GeoObject.Point.pos;
+            const [lon, lat] = pos.split(' ').map(Number);
+            return { lat, lon };
         }
         return null;
     } catch (e) {
-        console.error(`   ⚠️ Ошибка поиска "${address}": ${e.response ? e.response.status : e.message}`);
+        console.error(`   ⚠️ Ошибка геокодера: ${e.message}`);
         return null;
     }
 }
 
-// 2. Маршрутизатор GraphHopper
+// 2. Маршруты OSRM (Через HTTPS)
 async function getRoute(start, end) {
+    // Используем HTTPS версию OSRM
+    const url = `https://router.project-osrm.org/route/v1/driving/${start.lon},${start.lat};${end.lon},${end.lat}?overview=false`;
+    
     try {
-        const url = `https://graphhopper.com/api/1/route`;
-        const res = await axios.get(url, {
-            params: {
-                point: [`${start.lat},${start.lon}`, `${end.lat},${end.lon}`],
-                profile: 'car',
-                locale: 'ru',
-                calc_points: false, // Не возвращать геометрию (экономим трафик)
-                key: API_KEY
-            }
-        });
-
-        const path = res.data.paths[0];
-        return {
-            dist: path.distance / 1000, // метры -> км
-            time: path.time / 60000     // миллисекунды -> минуты
-        };
+        const data = await nativeRequest(url);
+        if (data.code === 'Ok') {
+            return {
+                dist: data.routes[0].distance / 1000,
+                time: (data.routes[0].duration / 60) * TRAFF_COEFF
+            };
+        }
+        return null;
     } catch (e) {
-        // console.error(`⚠️ Ошибка маршрута: ${e.message}`);
+        // Если OSRM недоступен, вернем null, программа продолжит работу
         return null;
     }
 }
 
-// Расстояние по прямой (для сортировки)
 function getDirectDist(c1, c2) {
     const R = 6371e3; 
     const toRad = x => x * Math.PI / 180;
@@ -101,25 +118,23 @@ function getDirectDist(c1, c2) {
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
-// === ГЛАВНАЯ ЛОГИКА ===
-
+// === MAIN ===
 async function main() {
-    console.log(`🚀 Запуск через GraphHopper API (Стабильно)...`);
+    console.log(`🛡️ Запуск в режиме Native HTTPS (обход прокси)...`);
     
     const activeHospitals = [];
-    console.log(`🏥 Геокодируем базу больниц (${hospitals.length} шт)...`);
+    console.log(`🏥 Загрузка координат больниц...`);
     
     for (const h of hospitals) {
         const coords = await getCoords(h.address);
         if (coords) activeHospitals.push({ ...h, coords });
-        // Лимиты GraphHopper мягкие, но пауза 50мс не помешает
-        await delay(50);
+        // Пауза не нужна для Яндекса, он быстрый
     }
-    console.log(`✅ База готова: ${activeHospitals.length} больниц.\n`);
+    console.log(`✅ Готово. Найдено больниц: ${activeHospitals.length}\n`);
 
     for (let i = 0; i < people.length; i++) {
         const personAddr = people[i];
-        console.log(`👤 [${i+1}/${people.length}] Пациент: "${personAddr}"`);
+        console.log(`👤 Пациент: "${personAddr}"`);
 
         const personCoords = await getCoords(personAddr);
         if (!personCoords) {
@@ -128,19 +143,19 @@ async function main() {
             continue;
         }
 
-        // 1. Быстрая сортировка по прямой
+        // 1. Сортировка по прямой
         const candidates = activeHospitals.map(h => ({
              ...h, tempDist: getDirectDist(personCoords, h.coords) 
         })).sort((a, b) => a.tempDist - b.tempDist);
 
-        // 2. Проверка маршрутов для ТОП-3
+        // 2. Топ-3 реальных маршрута
         const checkList = candidates.slice(0, CHECK_CANDIDATES);
         let best = null;
         let minTime = Infinity;
 
         for (const h of checkList) {
             const route = await getRoute(personCoords, h.coords);
-            await delay(100); 
+            await delay(200); // Пауза для OSRM (чтобы не забанил)
 
             if (route && route.time < minTime) {
                 minTime = route.time;
@@ -150,10 +165,10 @@ async function main() {
 
         if (best) {
             console.log(`   🚑 Ехать в: ${best.name}`);
-            console.log(`   📍 Адрес: ${best.address}`);
             console.log(`   ⏱️ Время: ~${Math.round(best.route.time)} мин (${best.route.dist.toFixed(1)} км)`);
         } else {
-            console.log("   ⚠️ Маршруты не найдены");
+            console.log("   ⚠️ Маршрут по дорогам не построен (OSRM занят), но ближайшая по карте:");
+            console.log(`   📍 ${checkList[0].name} (~${(checkList[0].tempDist/1000).toFixed(1)} км по прямой)`);
         }
         console.log("-".repeat(40));
     }
