@@ -90,11 +90,9 @@ async function getCoords(address, url) {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         
         const data = await res.json();
-        const featureMember = data.response.GeoObjectCollection.featureMember;
+
         
-        if (!featureMember || featureMember.length === 0) return null;
-        
-        const [lon, lat] = featureMember[0].GeoObject.Point.pos.split(' ').map(Number);
+        const [lon, lat] = data?.response?.GeoObjectCollection?.featureMember?.[0]?.GeoObject?.Point?.pos.split(' ').map(Number);
         return { lat, lon };
     } catch (e) {
         return null; // Ошибки обрабатываем выше
