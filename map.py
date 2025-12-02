@@ -1,112 +1,126 @@
 import requests
 from geopy.geocoders import Nominatim
 import time
+import urllib3
+
+# Отключаем надоедливые предупреждения о небезопасном соединении (из-за verify=False)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ==========================================
-# 1. ВВОД АДРЕСОВ (Можно писать с маленькой буквы)
+# 1. НАСТРОЙКИ ПРОКСИ (ЗАПОЛНИТЕ ЭТО!)
 # ==========================================
-START_ADDRESS = "тверская 6"       # Точка А
-END_ADDRESS   = "парк горького"    # Точка Б
+# Если прокси без пароля: "http://адрес:порт"
+# Если с паролем: "http://логин:пароль@адрес:порт"
+
+# Пример: "http://10.10.0.1:8080"
+MY_PROXY = ""  
+
+# Если оставите кавычки пустыми (""), скрипт попробует найти прокси системы сам.
 # ==========================================
+
+START_ADDRESS = "тверская 6"
+END_ADDRESS   = "парк горького"
+
+def get_proxies():
+    if not MY_PROXY:
+        return None
+    return {
+        "http": MY_PROXY,
+        "https": MY_PROXY
+    }
 
 def get_coords_osm(address_text):
-    """
-    Ищет координаты через бесплатный Nominatim (OpenStreetMap).
-    """
-    # Создаем геокодер. ВАЖНО: user_agent должен быть уникальным, иначе заблокируют.
-    geolocator = Nominatim(user_agent="moscow_simple_router_v2")
+    # geopy сложно настроить через словарь прокси напрямую, 
+    # поэтому используем requests + Nominatim API вручную
     
-    # Уточняем, что ищем в Москве, Россия
-    query = f"{address_text}, Москва, Россия"
+    base_url = "https://nominatim.openstreetmap.org/search"
+    params = {
+        "q": f"{address_text}, Москва, Россия",
+        "format": "json",
+        "limit": 1
+    }
     
+    headers = {
+        "User-Agent": "MoscowWorkScript/1.0" 
+    }
+
     try:
-        # language='ru' помогает получать адреса на русском
-        location = geolocator.geocode(query, language='ru')
+        # verify=False ОЧЕНЬ ВАЖЕН для рабочих сетей
+        response = requests.get(
+            base_url, 
+            params=params, 
+            headers=headers, 
+            proxies=get_proxies(), 
+            verify=False,
+            timeout=10
+        )
         
-        if location:
-            return location.latitude, location.longitude, location.address
+        data = response.json()
+        if data:
+            item = data[0]
+            return float(item["lat"]), float(item["lon"]), item["display_name"]
         else:
             return None
     except Exception as e:
-        print(f"Ошибка поиска: {e}")
+        print(f"Ошибка поиска адреса: {e}")
         return None
 
 def get_route_osrm(start_lat, start_lon, end_lat, end_lon):
-    """
-    Строит маршрут через защищенный немецкий сервер OSRM (HTTPS).
-    """
     base_url = "https://routing.openstreetmap.de/routed-car/route/v1/driving/"
     coordinates = f"{start_lon},{start_lat};{end_lon},{end_lat}"
     url = f"{base_url}{coordinates}?overview=false"
     
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    }
-
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        data = response.json()
+        response = requests.get(
+            url, 
+            proxies=get_proxies(), 
+            verify=False, # Игнорируем ошибки сертификатов корпоративной сети
+            timeout=10
+        )
         
+        if response.status_code != 200:
+            return None
+            
+        data = response.json()
         if data.get("code") == "Ok":
-            route = data["routes"][0]
-            return route["distance"], route["duration"]
+            return data["routes"][0]["distance"], data["routes"][0]["duration"]
         return None
     except Exception as e:
-        print(f"Ошибка маршрутизации: {e}")
+        print(f"Ошибка маршрута: {e}")
         return None
 
 def main():
-    print("=== Поиск маршрута (Без Яндекса / OpenStreetMap) ===")
-    print(f"Запрос А: {START_ADDRESS}")
-    print(f"Запрос Б: {END_ADDRESS}")
-    print("-" * 40)
+    print("=== Поиск маршрута (Корпоративный режим) ===")
+    
+    if MY_PROXY:
+        print(f"⚙️ Используем прокси: {MY_PROXY}")
+    else:
+        print("⚙️ Пробуем системные настройки (без явного прокси)...")
 
-    # 1. Ищем координаты
-    # Nominatim требует паузу между запросами (правила вежливости OSM), ждем 1 сек
+    # 1. Поиск координат
     loc_a = get_coords_osm(START_ADDRESS)
-    time.sleep(1.1) 
+    time.sleep(1) # Вежливость
     loc_b = get_coords_osm(END_ADDRESS)
 
-    if not loc_a:
-        print(f"❌ Не удалось найти адрес: '{START_ADDRESS}'")
-        print("💡 Совет: В бесплатной версии пишите адрес точнее (например, с пробелом: 'Тверская 1')")
-        return
-    if not loc_b:
-        print(f"❌ Не удалось найти адрес: '{END_ADDRESS}'")
+    if not loc_a or not loc_b:
+        print("❌ Не удалось найти адреса. Проверьте настройки прокси.")
         return
 
-    lat_a, lon_a, addr_a = loc_a
-    lat_b, lon_b, addr_b = loc_b
+    print(f"✅ Точка А: {loc_a[2]}")
+    print(f"✅ Точка Б: {loc_b[2]}")
 
-    # Очищаем адрес для красивого вывода (убираем страну и индекс)
-    short_addr_a = addr_a.split(", Москва")[0]
-    short_addr_b = addr_b.split(", Москва")[0]
-
-    print(f"✅ Найдено А: {short_addr_a}...")
-    print(f"✅ Найдено Б: {short_addr_b}...")
-
-    # 2. Считаем маршрут
-    result = get_route_osrm(lat_a, lon_a, lat_b, lon_b)
+    # 2. Маршрут
+    result = get_route_osrm(loc_a[0], loc_a[1], loc_b[0], loc_b[1])
 
     if result:
-        dist_m, time_s = result
-        dist_km = round(dist_m / 1000, 2)
-        
-        # Перевод времени
-        time_min = int(time_s // 60)
-        hours = time_min // 60
-        minutes = time_min % 60
-        
-        time_str = f"{minutes} мин"
-        if hours > 0:
-            time_str = f"{hours} ч {minutes} мин"
-
-        print("\n" + "=" * 30)
+        dist_km = round(result[0] / 1000, 2)
+        time_min = int(result[1] // 60)
+        print("="*30)
         print(f"🛣  Расстояние: {dist_km} км")
-        print(f"⏱  Время:      ~{time_str}")
-        print("=" * 30)
+        print(f"⏱  Время: ~{time_min} мин")
+        print("="*30)
     else:
-        print("❌ Не удалось построить маршрут.")
+        print("❌ Ошибка построения маршрута.")
 
 if __name__ == "__main__":
     main()
