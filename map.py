@@ -1,126 +1,123 @@
 import requests
-from geopy.geocoders import Nominatim
-import time
-import urllib3
-
-# Отключаем надоедливые предупреждения о небезопасном соединении (из-за verify=False)
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ==========================================
-# 1. НАСТРОЙКИ ПРОКСИ (ЗАПОЛНИТЕ ЭТО!)
+# 1. НАСТРОЙКИ
 # ==========================================
-# Если прокси без пароля: "http://адрес:порт"
-# Если с паролем: "http://логин:пароль@адрес:порт"
+YANDEX_API_KEY = "40c0ece5-dbf1-44cf-97f9-1a0e1a5f0ef7"
 
-# Пример: "http://10.10.0.1:8080"
-MY_PROXY = ""  
-
-# Если оставите кавычки пустыми (""), скрипт попробует найти прокси системы сам.
-# ==========================================
-
-START_ADDRESS = "тверская 6"
+# Адреса (программа сама добавит 'Москва')
+START_ADDRESS = "тверская 1" 
 END_ADDRESS   = "парк горького"
+# ==========================================
 
-def get_proxies():
-    if not MY_PROXY:
-        return None
-    return {
-        "http": MY_PROXY,
-        "https": MY_PROXY
-    }
-
-def get_coords_osm(address_text):
-    # geopy сложно настроить через словарь прокси напрямую, 
-    # поэтому используем requests + Nominatim API вручную
+def get_moscow_location(address_text):
+    """
+    Ищет координаты через Яндекс Геокодер.
+    """
+    search_query = f"Москва {address_text}"
+    base_url = "https://geocode-maps.yandex.ru/1.x/"
     
-    base_url = "https://nominatim.openstreetmap.org/search"
     params = {
-        "q": f"{address_text}, Москва, Россия",
+        "apikey": YANDEX_API_KEY,
+        "geocode": search_query,
         "format": "json",
-        "limit": 1
-    }
-    
-    headers = {
-        "User-Agent": "MoscowWorkScript/1.0" 
+        "results": 1
     }
 
     try:
-        # verify=False ОЧЕНЬ ВАЖЕН для рабочих сетей
-        response = requests.get(
-            base_url, 
-            params=params, 
-            headers=headers, 
-            proxies=get_proxies(), 
-            verify=False,
-            timeout=10
-        )
-        
+        response = requests.get(base_url, params=params)
         data = response.json()
-        if data:
-            item = data[0]
-            return float(item["lat"]), float(item["lon"]), item["display_name"]
-        else:
+        
+        geo_object_collection = data["response"]["GeoObjectCollection"]
+        if len(geo_object_collection["featureMember"]) == 0:
             return None
+
+        top_result = geo_object_collection["featureMember"][0]["GeoObject"]
+        full_address = top_result["metaDataProperty"]["GeocoderMetaData"]["text"]
+        pos = top_result["Point"]["pos"]
+        lon, lat = pos.split(" ")
+        
+        return float(lat), float(lon), full_address
+
     except Exception as e:
-        print(f"Ошибка поиска адреса: {e}")
+        print(f"Ошибка геокодирования: {e}")
         return None
 
-def get_route_osrm(start_lat, start_lon, end_lat, end_lon):
+def get_route_osrm_secure(start_lat, start_lon, end_lat, end_lon):
+    """
+    Использует HTTPS зеркало OSRM (обычно не заблокировано).
+    """
+    # Используем немецкий сервер OSM (он стабильнее и работает по HTTPS)
     base_url = "https://routing.openstreetmap.de/routed-car/route/v1/driving/"
+    
     coordinates = f"{start_lon},{start_lat};{end_lon},{end_lat}"
     url = f"{base_url}{coordinates}?overview=false"
-    
+
+    # Притворяемся обычным браузером, чтобы нас не блокировали
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+
     try:
-        response = requests.get(
-            url, 
-            proxies=get_proxies(), 
-            verify=False, # Игнорируем ошибки сертификатов корпоративной сети
-            timeout=10
-        )
+        response = requests.get(url, headers=headers, timeout=10)
         
         if response.status_code != 200:
+            print(f"Сервер маршрутов вернул ошибку: {response.status_code}")
             return None
             
         data = response.json()
+        
         if data.get("code") == "Ok":
-            return data["routes"][0]["distance"], data["routes"][0]["duration"]
+            route = data["routes"][0]
+            return route["distance"], route["duration"]
         return None
     except Exception as e:
-        print(f"Ошибка маршрута: {e}")
+        print(f"Ошибка соединения с сервером маршрутов: {e}")
         return None
 
 def main():
-    print("=== Поиск маршрута (Корпоративный режим) ===")
+    print("=== Расчет маршрута (Режим без прокси) ===")
     
-    if MY_PROXY:
-        print(f"⚙️ Используем прокси: {MY_PROXY}")
-    else:
-        print("⚙️ Пробуем системные настройки (без явного прокси)...")
-
-    # 1. Поиск координат
-    loc_a = get_coords_osm(START_ADDRESS)
-    time.sleep(1) # Вежливость
-    loc_b = get_coords_osm(END_ADDRESS)
+    # 1. Геокодирование (Яндекс)
+    loc_a = get_moscow_location(START_ADDRESS)
+    loc_b = get_moscow_location(END_ADDRESS)
 
     if not loc_a or not loc_b:
-        print("❌ Не удалось найти адреса. Проверьте настройки прокси.")
+        print("❌ Не удалось найти координаты одного из адресов.")
         return
 
-    print(f"✅ Точка А: {loc_a[2]}")
-    print(f"✅ Точка Б: {loc_b[2]}")
+    lat_a, lon_a, addr_a = loc_a
+    lat_b, lon_b, addr_b = loc_b
 
-    # 2. Маршрут
-    result = get_route_osrm(loc_a[0], loc_a[1], loc_b[0], loc_b[1])
+    print(f"📍 Откуда: {addr_a}")
+    print(f"📍 Куда:   {addr_b}")
+
+    # 2. Маршрутизация (Защищенный OSRM)
+    print("\n🔄 Запрос маршрута...")
+    result = get_route_osrm_secure(lat_a, lon_a, lat_b, lon_b)
 
     if result:
-        dist_km = round(result[0] / 1000, 2)
-        time_min = int(result[1] // 60)
-        print("="*30)
-        print(f"🛣  Расстояние: {dist_km} км")
-        print(f"⏱  Время: ~{time_min} мин")
-        print("="*30)
+        dist_m, time_s = result
+        dist_km = round(dist_m / 1000, 2)
+        
+        # Красивый вывод времени
+        time_min = int(time_s // 60)
+        hours = time_min // 60
+        minutes = time_min % 60
+        
+        time_str = f"{minutes} мин"
+        if hours > 0:
+            time_str = f"{hours} ч {minutes} мин"
+
+        print("-" * 30)
+        print(f"🚗 Дистанция: {dist_km} км")
+        print(f"⏱  Время:     {time_str} (при свободных дорогах)")
+        print("-" * 30)
     else:
-        print("❌ Ошибка построения маршрута.")
+        print("❌ Не удалось построить маршрут. Возможно, сервер перегружен.")
 
 if __name__ == "__main__":
-    main()
+    if "ВАШ_КЛЮЧ" in YANDEX_API_KEY:
+        print("⚠️ ОШИБКА: Вставьте API ключ Яндекса в код!")
+    else:
+        main()
