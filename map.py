@@ -1,20 +1,42 @@
 import requests
+import sqlite3
+import time
+import os
 
 # ==========================================
 # 1. НАСТРОЙКИ
 # ==========================================
 YANDEX_API_KEY = "40c0ece5-dbf1-44cf-97f9-1a0e1a5f0ef7"
+SQLITE_DB_NAME = "routing_results.db"
 
-# Адреса (программа сама добавит 'Москва')
-START_ADDRESS = "тверская 1" 
-END_ADDRESS   = "парк горького"
+# ==========================================
+# 2. ГЕНЕРАТОР ДАННЫХ (ВМЕСТО ORACLE)
+# ==========================================
+def get_mock_data():
+    """
+    Возвращает список адресов для обработки.
+    Эмулирует ответ от базы данных.
+    Формат: (ID заявки, ID больницы, Адрес больницы, Адрес пациента)
+    """
+    print("📋 Загрузка тестового списка адресов...")
+    return [
+        (1001, 5, "Москва, Тверская 1", "Москва, Парк Горького"),
+        (1002, 5, "Москва, Тверская 1", "Москва, ВДНХ"),
+        (1003, 8, "Москва, Ленинский проспект 8", "Москва, Арбат 10"),
+        (1004, 8, "Москва, Ленинский проспект 8", "Химки, Ленинградская 1"),
+        (1005, 3, "Москва, Большая Пироговская 2", "Мытищи, Мира 10")
+    ]
+
+# ==========================================
+# 3. ЛОГИКА (ГЕОКОДЕР + МАРШРУТЫ)
 # ==========================================
 
 def get_moscow_location(address_text):
-    """
-    Ищет координаты через Яндекс Геокодер.
-    """
-    search_query = f"Москва {address_text}"
+    """Превращает адрес в координаты (Lat, Lon) через Яндекс."""
+    if not address_text:
+        return None
+        
+    search_query = address_text if "москва" in address_text.lower() else f"Москва {address_text}"
     base_url = "https://geocode-maps.yandex.ru/1.x/"
     
     params = {
@@ -25,99 +47,130 @@ def get_moscow_location(address_text):
     }
 
     try:
-        response = requests.get(base_url, params=params)
+        response = requests.get(base_url, params=params, timeout=5)
         data = response.json()
         
-        geo_object_collection = data["response"]["GeoObjectCollection"]
-        if len(geo_object_collection["featureMember"]) == 0:
+        geo_object = data["response"]["GeoObjectCollection"]["featureMember"]
+        if not geo_object:
             return None
 
-        top_result = geo_object_collection["featureMember"][0]["GeoObject"]
-        full_address = top_result["metaDataProperty"]["GeocoderMetaData"]["text"]
-        pos = top_result["Point"]["pos"]
+        pos = geo_object[0]["GeoObject"]["Point"]["pos"]
         lon, lat = pos.split(" ")
-        
-        return float(lat), float(lon), full_address
+        return float(lat), float(lon)
 
     except Exception as e:
-        print(f"Ошибка геокодирования: {e}")
+        print(f"⚠️ Ошибка геокодирования: {e}")
         return None
 
-def get_route_osrm_secure(start_lat, start_lon, end_lat, end_lon):
-    """
-    Использует HTTPS зеркало OSRM (обычно не заблокировано).
-    """
-    # Используем немецкий сервер OSM (он стабильнее и работает по HTTPS)
+def get_route_osrm(start_lat, start_lon, end_lat, end_lon):
+    """Считает маршрут через открытый сервис OSRM."""
     base_url = "https://routing.openstreetmap.de/routed-car/route/v1/driving/"
-    
     coordinates = f"{start_lon},{start_lat};{end_lon},{end_lat}"
     url = f"{base_url}{coordinates}?overview=false"
-
-    # Притворяемся обычным браузером, чтобы нас не блокировали
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    }
+    
+    headers = {"User-Agent": "Mozilla/5.0 Python Script"}
 
     try:
         response = requests.get(url, headers=headers, timeout=10)
-        
         if response.status_code != 200:
-            print(f"Сервер маршрутов вернул ошибку: {response.status_code}")
             return None
             
         data = response.json()
-        
         if data.get("code") == "Ok":
             route = data["routes"][0]
-            return route["distance"], route["duration"]
+            # distance (метры) -> км, duration (сек) -> мин
+            return round(route["distance"] / 1000, 2), round(route["duration"] / 60, 1)
         return None
-    except Exception as e:
-        print(f"Ошибка соединения с сервером маршрутов: {e}")
+    except Exception:
         return None
+
+# ==========================================
+# 4. БАЗА ДАННЫХ (SQLITE)
+# ==========================================
+
+def init_db():
+    """Создает файл базы данных, если его нет."""
+    conn = sqlite3.connect(SQLITE_DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS route_calculations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            record_id INTEGER,
+            hospital_id INTEGER,
+            hospital_address TEXT,
+            patient_address TEXT,
+            distance_km REAL,
+            duration_min REAL,
+            status TEXT,
+            calculated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def save_to_db(data):
+    """Сохраняет одну строку в БД."""
+    conn = sqlite3.connect(SQLITE_DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO route_calculations 
+        (record_id, hospital_id, hospital_address, patient_address, distance_km, duration_min, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, data)
+    conn.commit()
+    conn.close()
+
+# ==========================================
+# 5. ЗАПУСК
+# ==========================================
 
 def main():
-    print("=== Расчет маршрута (Режим без прокси) ===")
+    print("=== 🚀 Запуск локального расчета маршрутов ===")
     
-    # 1. Геокодирование (Яндекс)
-    loc_a = get_moscow_location(START_ADDRESS)
-    loc_b = get_moscow_location(END_ADDRESS)
+    # 1. Создаем БД
+    init_db()
+    
+    # 2. Получаем список задач (теперь берется из функции get_mock_data, а не Oracle)
+    tasks = get_mock_data()
+    
+    print(f"\nНайдено задач для обработки: {len(tasks)}\n")
 
-    if not loc_a or not loc_b:
-        print("❌ Не удалось найти координаты одного из адресов.")
-        return
-
-    lat_a, lon_a, addr_a = loc_a
-    lat_b, lon_b, addr_b = loc_b
-
-    print(f"📍 Откуда: {addr_a}")
-    print(f"📍 Куда:   {addr_b}")
-
-    # 2. Маршрутизация (Защищенный OSRM)
-    print("\n🔄 Запрос маршрута...")
-    result = get_route_osrm_secure(lat_a, lon_a, lat_b, lon_b)
-
-    if result:
-        dist_m, time_s = result
-        dist_km = round(dist_m / 1000, 2)
+    for i, item in enumerate(tasks):
+        rec_id, hosp_id, addr_from, addr_to = item
         
-        # Красивый вывод времени
-        time_min = int(time_s // 60)
-        hours = time_min // 60
-        minutes = time_min % 60
+        print(f"[{i+1}/{len(tasks)}] ID {rec_id}: {addr_from} -> {addr_to}")
         
-        time_str = f"{minutes} мин"
-        if hours > 0:
-            time_str = f"{hours} ч {minutes} мин"
+        dist = 0.0
+        time_m = 0.0
+        status = "OK"
+        
+        # Шаг 1: Координаты
+        loc_a = get_moscow_location(addr_from)
+        loc_b = get_moscow_location(addr_to)
+        
+        if loc_a and loc_b:
+            # Шаг 2: Маршрут
+            res = get_route_osrm(loc_a[0], loc_a[1], loc_b[0], loc_b[1])
+            if res:
+                dist, time_m = res
+                print(f"   ✅ Дистанция: {dist} км, Время: {time_m} мин")
+            else:
+                status = "ERROR_ROUTE"
+                print("   ❌ Не удалось построить маршрут")
+        else:
+            status = "ERROR_GEOCODE"
+            print("   ❌ Не найдены координаты адресов")
+            
+        # Шаг 3: Сохранение
+        save_to_db((rec_id, hosp_id, addr_from, addr_to, dist, time_m, status))
+        
+        # Пауза (чтобы не забанили)
+        time.sleep(0.5)
 
-        print("-" * 30)
-        print(f"🚗 Дистанция: {dist_km} км")
-        print(f"⏱  Время:     {time_str} (при свободных дорогах)")
-        print("-" * 30)
-    else:
-        print("❌ Не удалось построить маршрут. Возможно, сервер перегружен.")
+    print("\n" + "="*40)
+    print("🎉 Готово!")
+    print(f"📂 Результат сохранен в файл: {os.path.abspath(SQLITE_DB_NAME)}")
+    print("Вы можете открыть этот файл с помощью 'DB Browser for SQLite' или прочитать через Python.")
 
 if __name__ == "__main__":
-    if "ВАШ_КЛЮЧ" in YANDEX_API_KEY:
-        print("⚠️ ОШИБКА: Вставьте API ключ Яндекса в код!")
-    else:
-        main()
+    main()
